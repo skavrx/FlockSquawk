@@ -2,8 +2,6 @@
 
 FlockSquawk is a modular, event-driven ESP32 project for **passive RF awareness**. It listens to nearby WiFi and Bluetooth Low Energy activity, analyzes patterns against known signatures, and provides feedback through audio alerts, on-device displays, and structured telemetry.
 
-![alt text]([https://github.com/f1yaw4y/FlockSquawk/blob/main/images/IMG_20260122_022956_440.jpg?raw=true)
-
 ## There is currently a critical bug in the 128x32 OLED variant. The Wi‑Fi packet parser is preventing all frames from being recognized. Problem: The subtype bits were extracted with 0x0F, but in 802.11 they’re in bits 4–7 of the first byte. That means the code always sees subtype 0, so it discarded every frame. 
 
 ## Patch: Change the mask to 0x00F0 so beacons/probes are correctly detected.
