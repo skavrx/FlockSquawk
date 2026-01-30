@@ -8,6 +8,8 @@
 #include <string.h>
 #include <ctype.h>
 #include <stdint.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/portmacro.h"
 #include "esp_wifi.h"
 #include "esp_wifi_types.h"
 
@@ -67,8 +69,15 @@ namespace {
     bool alertVisible = false;
     uint32_t alertStartMs = 0;
     uint32_t alertLastFlashMs = 0;
+    uint32_t alertUntilMs = 0;
     uint32_t detectionCount = 0;
     bool powerSaverEnabled = true;
+    portMUX_TYPE threatMux = portMUX_INITIALIZER_UNLOCKED;
+    volatile bool threatPending = false;
+    ThreatEvent pendingThreat;
+    portMUX_TYPE wifiMux = portMUX_INITIALIZER_UNLOCKED;
+    volatile bool wifiFramePending = false;
+    WiFiFrameEvent pendingWiFiFrame;
     bool statusMessageActive = false;
     uint32_t statusMessageUntilMs = 0;
 
@@ -263,20 +272,21 @@ namespace {
         M5.Power.setLed(on);
     }
 
-    void startAlert() {
+    void startAlert(uint32_t nowMs) {
         setDisplayOn();
         detectionCount++;
         alertActive = true;
         alertVisible = false;
-        alertStartMs = millis();
+        alertStartMs = nowMs;
         alertLastFlashMs = 0;
+        alertUntilMs = nowMs + ALERT_DURATION_MS;
         M5.Display.fillScreen(TFT_RED);
         drawAlertText(true);
     }
 
     bool updateAlert(uint32_t nowMs) {
         if (!alertActive) return false;
-        if (nowMs - alertStartMs >= ALERT_DURATION_MS) {
+        if (nowMs >= alertUntilMs) {
             alertActive = false;
             setAlertLed(false);
             return false;
@@ -295,6 +305,15 @@ namespace {
         }
 
         return true;
+    }
+
+    void triggerAlert(uint32_t nowMs) {
+        if (!alertActive) {
+            startAlert(nowMs);
+            return;
+        }
+        detectionCount++;
+        alertUntilMs = nowMs + ALERT_DURATION_MS;
     }
 
     void showStatusMessage(const char* line1, const char* line2) {
@@ -700,8 +719,10 @@ void setup() {
     Serial.println();
     
     EventBus::subscribeWifiFrame([](const WiFiFrameEvent& event) {
-        threatEngine.analyzeWiFiFrame(event);
-        latestRssi = event.rssi;
+        portENTER_CRITICAL(&wifiMux);
+        pendingWiFiFrame = event;
+        wifiFramePending = true;
+        portEXIT_CRITICAL(&wifiMux);
     });
     
     EventBus::subscribeBluetoothDevice([](const BluetoothDeviceEvent& event) {
@@ -709,8 +730,10 @@ void setup() {
     });
     
     EventBus::subscribeThreat([](const ThreatEvent& event) {
-        reporter.handleThreatDetection(event);
-        startAlert();
+        portENTER_CRITICAL(&threatMux);
+        pendingThreat = event;
+        threatPending = true;
+        portEXIT_CRITICAL(&threatMux);
     });
     
     threatEngine.initialize();
@@ -744,6 +767,26 @@ void loop() {
     uint32_t now = millis();
     bool shouldPowerSave = powerSaverEnabled;
 
+    if (wifiFramePending) {
+        WiFiFrameEvent frameCopy;
+        portENTER_CRITICAL(&wifiMux);
+        frameCopy = pendingWiFiFrame;
+        wifiFramePending = false;
+        portEXIT_CRITICAL(&wifiMux);
+        latestRssi = frameCopy.rssi;
+        threatEngine.analyzeWiFiFrame(frameCopy);
+    }
+
+    if (threatPending) {
+        ThreatEvent threatCopy;
+        portENTER_CRITICAL(&threatMux);
+        threatCopy = pendingThreat;
+        threatPending = false;
+        portEXIT_CRITICAL(&threatMux);
+        reporter.handleThreatDetection(threatCopy);
+        triggerAlert(now);
+    }
+
     if (M5.BtnB.pressedFor(2000) && !powerToggleHandled) {
         powerSaverEnabled = !powerSaverEnabled;
         powerToggleHandled = true;
@@ -767,6 +810,10 @@ void loop() {
     }
 
     bool isAlerting = updateAlert(now);
+    if (isAlerting) {
+        wasAlertActive = true;
+        return;
+    }
     if (wasAlertActive && !isAlerting) {
         if (shouldPowerSave) {
             setDisplayOff();
