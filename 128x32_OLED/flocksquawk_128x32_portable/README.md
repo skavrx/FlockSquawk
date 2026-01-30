@@ -93,6 +93,8 @@ If the display stays blank, upload an I2C scanner sketch to confirm the address.
 5. Search for "ESP32" and install "esp32 by Espressif Systems"
 6. Select your ESP32 board: **Tools** → **Board** → **ESP32 Arduino** → **ESP32 Dev Module** (or your specific board)
 
+**Important:** Use **esp32 by Espressif Systems** version **3.0.7 or older**. Newer versions fail to compile due to an **IRAM overflow** issue.
+
 ---
 
 ## Required Libraries
@@ -114,7 +116,7 @@ No NeoPixel, encoder, or Mini12864 libraries are required for this variant.
 
 ```bash
 git clone <repository-url>
-cd flocksquawk_128x32
+cd FlockSquawk-main/128x32_OLED/flocksquawk_128x32_portable
 ```
 
 Or download as ZIP and extract.
@@ -123,7 +125,7 @@ Or download as ZIP and extract.
 
 1. Open Arduino IDE
 2. Navigate to **File** → **Open**
-3. Select `flocksquawk.ino` from this folder
+3. Select `flocksquawk_128x32_portable.ino` from this folder
 
 ---
 
@@ -209,8 +211,8 @@ Edit `src/DeviceSignatures.h` to customize detection rules:
 ## Project Structure
 
 ```
-flocksquawk_128x32/
-├── flocksquawk_128x32.ino   # Main orchestrator
+flocksquawk_128x32_portable/
+├── flocksquawk_128x32_portable.ino   # Main orchestrator
 ├── README.md                # This file
 ├── src/
 │   ├── EventBus.h
