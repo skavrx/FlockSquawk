@@ -7,9 +7,10 @@ A modular, event-driven ESP32 project that passively detects surveillance device
 - **WiFi Scanning**: Promiscuous mode detection of probe requests and beacons
 - **Bluetooth Low Energy**: Active scanning for device names, MAC addresses, and service UUIDs
 - **Pattern Matching**: Identifies devices based on SSID patterns, MAC prefixes, device names, and service UUIDs
+- **GPS Location Tracking**: Optional BN-220 GPS module integration for logging detection coordinates
 - **Buzzer Alerts**: Internal buzzer tones for startup and detections
 - **Status Display**: On-screen startup and scanning state with current WiFi channel
-- **JSON Telemetry**: Structured event reporting via serial output
+- **JSON Telemetry**: Structured event reporting via serial output with GPS coordinates
 - **Event-Driven Architecture**: Modular design for easy extension
 
 ## Hardware Requirements
@@ -18,6 +19,10 @@ A modular, event-driven ESP32 project that passively detects surveillance device
 
 - **M5StickC PLUS2 (ESP32 V3 Mini)** device
 - **USB Cable** for programming and power
+
+### Optional Components
+
+- **BN-220 GPS Module** for location tracking (see [GPS_INSTALLATION.md](GPS_INSTALLATION.md) for setup)
 
 ## Software Setup
 
@@ -52,6 +57,9 @@ Install the following libraries via Arduino IDE Library Manager:
 
 3. **M5Unified** by M5Stack
    - **Tools** → **Manage Libraries** → Search "M5Unified" → Install
+
+4. **TinyGPSPlus** by Mikal Hart (for GPS support)
+   - **Tools** → **Manage Libraries** → Search "TinyGPSPlus" → Install
 
 ### Additional ESP32 Tools
 
@@ -138,9 +146,21 @@ The system outputs JSON telemetry when threats are detected:
   "metadata": {
     "frame_type": "beacon",
     "detection_method": "combined_signature"
+  },
+  "location": {
+    "latitude": 37.774929,
+    "longitude": -122.419418,
+    "altitude_m": 15.2,
+    "satellites": 8,
+    "hdop": 1.2,
+    "fix_age_ms": 450,
+    "fix_valid": true,
+    "timestamp": "2026-02-16T18:45:23Z"
   }
 }
 ```
+
+**Note**: The `location` object is only included if GPS module is connected and has a valid fix. See [GPS_INSTALLATION.md](GPS_INSTALLATION.md) for GPS setup instructions.
 
 ### Buzzer Alerts
 

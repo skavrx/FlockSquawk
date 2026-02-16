@@ -1,0 +1,132 @@
+╔═══════════════════════════════════════════════════════════════════════════╗
+║                    BN-220 GPS → M5StickC Plus2 Wiring                     ║
+╚═══════════════════════════════════════════════════════════════════════════╝
+
+Quick Reference Wiring:
+━━━━━━━━━━━━━━━━━━━━━━
+
+    BN-220 GPS                M5StickC Plus2 (Grove Port)
+    ┌─────────┐              ┌──────────────────────┐
+    │         │              │                      │
+    │   VCC   ├──────────────┤ 3.3V (Red)          │
+    │         │              │                      │
+    │   GND   ├──────────────┤ GND  (Black)        │
+    │         │              │                      │
+    │   TX    ├──────────────┤ GPIO 33 (White)     │
+    │         │              │                      │
+    │   RX    ├──────────────┤ GPIO 32 (Yellow)    │
+    │         │              │   (optional)         │
+    └─────────┘              └──────────────────────┘
+
+
+Detailed Grove Port Pinout (Back of M5StickC Plus2):
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    ┌───────────────────┐
+    │  ●  ●  ●  ●       │  ← Grove Port (4-pin JST connector)
+    │  1  2  3  4       │
+    └───────────────────┘
+
+    Pin 1 (Yellow):  GPIO 32  → Connect to BN-220 RX (optional)
+    Pin 2 (White):   GPIO 33  → Connect to BN-220 TX (required)
+    Pin 3 (Red):     3.3V     → Connect to BN-220 VCC
+    Pin 4 (Black):   GND      → Connect to BN-220 GND
+
+
+Signal Flow:
+━━━━━━━━━━━
+
+    GPS Data Flow:
+    BN-220 TX  →  GPIO 33 (ESP32 RX on Serial2)  [REQUIRED]
+
+    Optional Config Flow:
+    GPIO 32 (ESP32 TX on Serial2)  →  BN-220 RX  [OPTIONAL]
+
+
+Physical Setup Tips:
+━━━━━━━━━━━━━━━━━━━
+
+    1. GPS Antenna Orientation:
+       ┌─────────────┐
+       │   BN-220    │  ← Antenna face UP toward sky
+       │  [Antenna]  │
+       │             │
+       └─────────────┘
+
+    2. Mounting Position:
+       - Keep GPS on top of device
+       - No metal above the antenna
+       - Clear view of sky for best performance
+
+    3. Cable Management:
+       - Keep wires as short as practical
+       - Avoid tight bends near GPS module
+       - Secure connections to prevent disconnection
+
+
+Connection Checklist:
+━━━━━━━━━━━━━━━━━━━━
+
+    [ ] BN-220 VCC connected to 3.3V (red Grove wire)
+    [ ] BN-220 GND connected to GND (black Grove wire)
+    [ ] BN-220 TX connected to GPIO 33 (white Grove wire) - CRITICAL
+    [ ] BN-220 RX connected to GPIO 32 (yellow Grove wire) - optional
+    [ ] GPS antenna facing upward
+    [ ] All connections secure
+    [ ] Power OFF before making connections
+    [ ] TinyGPSPlus library installed in Arduino IDE
+
+
+Verification After Wiring:
+━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    1. Power on M5StickC Plus2
+    2. Open Serial Monitor at 115200 baud
+    3. Look for: "[GPS] GPS module initialized on Serial2"
+    4. Go outdoors or near window
+    5. Wait 30-120 seconds for GPS fix
+    6. Look for: "[GPS] Location updated: XX.XXXXXX, XX.XXXXXX (sats: X)"
+
+
+Common Wiring Mistakes:
+━━━━━━━━━━━━━━━━━━━━━━━
+
+    ❌ TX-to-TX, RX-to-RX (WRONG - signals must cross)
+    ✅ TX-to-RX, RX-to-TX (CORRECT)
+
+    ❌ Using 5V from USB port (may damage ESP32)
+    ✅ Using 3.3V from Grove port
+
+    ❌ GPS antenna facing down or covered
+    ✅ GPS antenna facing up with clear sky view
+
+
+Troubleshooting:
+━━━━━━━━━━━━━━━
+
+    Problem: No "[GPS] GPS module initialized" message
+    Solution: Check TinyGPSPlus library installed, recompile code
+
+    Problem: GPS initializes but no location updates
+    Solution: Check BN-220 TX → GPIO 33 connection
+
+    Problem: GPS shows 0 satellites
+    Solution: Take device outdoors, wait longer (2-5 min cold start)
+
+    Problem: Coordinates are wrong
+    Solution: Wait for more satellites (need 4+ for accurate fix)
+
+
+Technical Details:
+━━━━━━━━━━━━━━━━
+
+    Serial Port:     Serial2 (hardware UART)
+    Baud Rate:       9600 (BN-220 default)
+    Protocol:        NMEA 0183
+    Data Format:     ASCII text, line-based
+    Update Rate:     1 Hz (default), configurable to 5 Hz
+    Voltage:         3.3V (3.0V - 3.6V safe range)
+    Current Draw:    ~25mA when searching, ~20mA with fix
+
+
+For complete setup instructions, see GPS_INSTALLATION.md

@@ -18,11 +18,13 @@
 #include "src/RadioScanner.h"
 #include "src/ThreatAnalyzer.h"
 #include "src/TelemetryReporter.h"
+#include "src/GPSHandler.h"
 
 // Global system components
 RadioScannerManager rfScanner;
 ThreatAnalyzer threatEngine;
 TelemetryReporter reporter;
+GPSHandler gpsModule;
 
 // Event bus handler implementations
 EventBus::WiFiFrameHandler EventBus::wifiHandler = nullptr;
@@ -37,15 +39,12 @@ namespace {
     const uint16_t BEEP_GAP_MS = 60;
     const uint16_t RADAR_LINE_COLOR = TFT_GREEN;
     const uint16_t STATUS_TEXT_COLOR = TFT_WHITE;
-    const uint32_t DOT_UPDATE_MS = 400;
+    const uint32_t DOT_UPDATE_MS = 500;
     const uint32_t BATTERY_UPDATE_MS = 3000;
-    const uint32_t SWEEP_UPDATE_MS = 10;
-    const uint8_t MAX_DOTS = 3;
-    const uint32_t RSSI_UPDATE_MS = 300;
+    const uint32_t GPS_UPDATE_MS = 1000;
+    const uint32_t RSSI_UPDATE_MS = 500;
     const int8_t RSSI_MIN_DBM = -100;
     const int8_t RSSI_MAX_DBM = -20;
-    const uint8_t RSSI_HISTORY_LEN = 80;
-    const uint16_t RSSI_LINE_COLOR = TFT_CYAN;
     const uint32_t ALERT_DURATION_MS = 4000;
     const uint32_t ALERT_FLASH_MS = 300;
     const uint16_t ALERT_BEEP_MS = 180;
@@ -61,9 +60,6 @@ namespace {
         }
     }
 
-    int8_t rssiHistory[RSSI_HISTORY_LEN];
-    uint8_t rssiIndex = 0;
-    bool rssiHistoryInitialized = false;
     int8_t latestRssi = RSSI_MIN_DBM;
     bool alertActive = false;
     bool alertVisible = false;
@@ -90,12 +86,6 @@ namespace {
     DisplayState displayState = DisplayState::Awake;
     uint32_t displayStateMs = 0;
 
-    int16_t graphTop() {
-        int16_t lineHeight = M5.Display.fontHeight();
-        return (lineHeight * 2) + 4 + 2;
-    }
-
-
     void setDisplayOn() {
         M5.Display.wakeup();
         M5.Display.setBrightness(DISPLAY_BRIGHTNESS_ON);
@@ -106,132 +96,102 @@ namespace {
         M5.Display.sleep();
     }
 
-    void ensureRssiHistoryInitialized() {
-        if (rssiHistoryInitialized) {
-            return;
+    // New clean display layout with LARGE text
+    void drawMainDisplay(uint8_t channel, uint8_t battery, uint32_t detections, bool animDot) {
+        M5.Display.fillScreen(TFT_BLACK);
+
+        int16_t yPos = 0;
+
+        // ===== LINE 1: WiFi Status - Size 2 =====
+        M5.Display.setTextSize(2);
+        M5.Display.setCursor(4, yPos);
+        M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
+        M5.Display.print("WiFi:");
+        M5.Display.setTextColor(TFT_YELLOW, TFT_BLACK);
+        M5.Display.printf("CH%d", channel);
+
+        // Scanning indicator
+        M5.Display.setTextColor(animDot ? TFT_GREEN : TFT_DARKGREY, TFT_BLACK);
+        M5.Display.print(" *");
+
+        yPos += 20;
+
+        // ===== LINE 2: GPS Status - Size 2 =====
+        M5.Display.setCursor(4, yPos);
+        int sats = gpsModule.getSatellites();
+        bool hasFix = gpsModule.hasValidFix();
+
+        M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
+        M5.Display.print("GPS:");
+
+        if (hasFix) {
+            M5.Display.setTextColor(TFT_GREEN, TFT_BLACK);
+            M5.Display.printf("FIX(%d)", sats);
+        } else if (sats > 0) {
+            M5.Display.setTextColor(TFT_YELLOW, TFT_BLACK);
+            M5.Display.printf("WAIT(%d)", sats);
+        } else {
+            M5.Display.setTextColor(TFT_RED, TFT_BLACK);
+            M5.Display.print("NOSIG");
         }
-        for (uint8_t i = 0; i < RSSI_HISTORY_LEN; i++) {
-            rssiHistory[i] = -70;
+
+        yPos += 20;
+
+        // ===== LINE 3-4: GPS Coordinates or status =====
+        M5.Display.setTextSize(2);
+        if (hasFix) {
+            // Latitude
+            M5.Display.setCursor(4, yPos);
+            M5.Display.setTextColor(TFT_CYAN, TFT_BLACK);
+            M5.Display.printf("%.5f", gpsModule.getLatitude());
+            yPos += 20;
+
+            // Longitude
+            M5.Display.setCursor(4, yPos);
+            M5.Display.setTextColor(TFT_CYAN, TFT_BLACK);
+            M5.Display.printf("%.5f", gpsModule.getLongitude());
+            yPos += 20;
+        } else {
+            M5.Display.setCursor(4, yPos);
+            M5.Display.setTextColor(TFT_DARKGREY, TFT_BLACK);
+            M5.Display.print("No GPS fix");
+            yPos += 40;
         }
-        rssiIndex = 0;
-        rssiHistoryInitialized = true;
-    }
 
-    void addRssiSample(int8_t rssi) {
-        ensureRssiHistoryInitialized();
-        if (rssi < RSSI_MIN_DBM) rssi = RSSI_MIN_DBM;
-        if (rssi > RSSI_MAX_DBM) rssi = RSSI_MAX_DBM;
-        rssiHistory[rssiIndex] = rssi;
-        rssiIndex = (rssiIndex + 1) % RSSI_HISTORY_LEN;
-    }
+        // Separator
+        M5.Display.drawLine(0, yPos, M5.Display.width(), yPos, TFT_DARKGREY);
+        yPos += 5;
 
-    void drawRssiChart() {
-        int16_t top = graphTop();
-        int16_t bottom = M5.Display.height() - 1;
-        if (bottom <= top + 6) return;
+        // ===== DETECTIONS & BATTERY - Size 2 =====
+        M5.Display.setCursor(4, yPos);
+        M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
+        M5.Display.print("DET:");
+        M5.Display.setTextColor(detections > 0 ? TFT_RED : TFT_GREEN, TFT_BLACK);
+        M5.Display.printf("%d", detections);
 
-        int16_t width = M5.Display.width();
-        int16_t height = bottom - top;
+        // Battery on same line
+        char batText[8];
+        snprintf(batText, sizeof(batText), "B:%d%%", battery);
+        int16_t batWidth = M5.Display.textWidth(batText);
+        M5.Display.setCursor(M5.Display.width() - batWidth - 4, yPos);
+        uint16_t batColor = (battery <= 20) ? TFT_RED : (battery <= 50) ? TFT_ORANGE : TFT_GREEN;
+        M5.Display.setTextColor(batColor, TFT_BLACK);
+        M5.Display.print(batText);
 
-        M5.Display.fillRect(0, top, width, height, TFT_BLACK);
-        M5.Display.drawRect(0, top, width, height, TFT_WHITE);
+        yPos += 20;
 
-        int16_t plotTop = top + 1;
-        int16_t plotBottom = bottom - 1;
-        int16_t plotHeight = plotBottom - plotTop;
-
-        int16_t lastX = -1;
-        int16_t lastY = -1;
-        for (uint8_t i = 0; i < RSSI_HISTORY_LEN; i++) {
-            uint8_t idx = (rssiIndex + i) % RSSI_HISTORY_LEN;
-            int16_t x = (int32_t)i * (width - 3) / (RSSI_HISTORY_LEN - 1) + 1;
-            int16_t rssi = rssiHistory[idx];
-            int32_t norm = (int32_t)(rssi - RSSI_MIN_DBM) * (plotHeight - 1) / (RSSI_MAX_DBM - RSSI_MIN_DBM);
-            int16_t y = plotBottom - norm;
-            if (lastX >= 0) {
-                M5.Display.drawLine(lastX, lastY, x, y, RSSI_LINE_COLOR);
-            }
-            lastX = x;
-            lastY = y;
+        // ===== RSSI on bottom if available - Size 1 =====
+        if (latestRssi > -90) {
+            M5.Display.setTextSize(1);
+            M5.Display.setCursor(4, yPos);
+            M5.Display.setTextColor(TFT_CYAN, TFT_BLACK);
+            M5.Display.printf("Signal: %d dBm", latestRssi);
         }
-    }
-
-    void drawGraphBox() {
-        int16_t top = graphTop();
-        int16_t bottom = M5.Display.height() - 1;
-        int16_t height = bottom - top + 1;
-        M5.Display.drawRect(0, top, M5.Display.width(), height, TFT_WHITE);
-    }
-
-    uint16_t batteryColor(uint8_t percent) {
-        if (percent <= 35) {
-            return TFT_RED;
-        }
-        if (percent <= 75) {
-            return TFT_BLUE;
-        }
-        return TFT_GREEN;
-    }
-
-    void drawBatteryPercent(uint8_t percent) {
-        char text[8];
-        snprintf(text, sizeof(text), "%u%%", percent);
-        int16_t textWidth = M5.Display.textWidth(text);
-        int16_t height = M5.Display.fontHeight();
-        int16_t x = M5.Display.width() - textWidth;
-        M5.Display.fillRect(x - 2, 0, textWidth + 2, height, TFT_BLACK);
-        M5.Display.setCursor(x, 0);
-        M5.Display.setTextColor(batteryColor(percent), TFT_BLACK);
-        M5.Display.print(text);
-    }
-
-    void drawDetectionCount(uint32_t count) {
-        char text[12];
-        snprintf(text, sizeof(text), "%u", count);
-        int16_t textWidth = M5.Display.textWidth(text);
-        int16_t height = M5.Display.fontHeight();
-        int16_t x = M5.Display.width() - textWidth;
-        int16_t y = height + 2;
-        M5.Display.fillRect(x - 2, y, textWidth + 2, height, TFT_BLACK);
-        M5.Display.setCursor(x, y);
-        M5.Display.setTextColor(RADAR_LINE_COLOR, TFT_BLACK);
-        M5.Display.print(text);
-    }
-
-    void drawBatteryArea(uint8_t percent, uint32_t count) {
-        drawBatteryPercent(percent);
-        drawDetectionCount(count);
-    }
-
-    void drawStatusText(uint8_t channel, uint8_t dots) {
-        char text[16];
-        char dotText[4] = "...";
-        dotText[dots] = '\0';
-        snprintf(text, sizeof(text), "Scanning%s", dotText);
-
-        int16_t lineHeight = M5.Display.fontHeight();
-        int16_t width = M5.Display.width();
-        int16_t statusHeight = (lineHeight * 2) + 4;
-
-        M5.Display.fillRect(0, 0, width, statusHeight, TFT_BLACK);
-        M5.Display.setCursor(0, 0);
-        M5.Display.setTextColor(STATUS_TEXT_COLOR, TFT_BLACK);
-        M5.Display.print(text);
-        M5.Display.setCursor(0, lineHeight + 4);
-        M5.Display.setTextColor(STATUS_TEXT_COLOR, TFT_BLACK);
-        M5.Display.printf("WiFi ch: %u", channel);
     }
 
     void initScanningUi(uint8_t channel, uint32_t nowMs) {
         setDisplayOn();
-        M5.Display.clear(TFT_BLACK);
-        M5.Display.setTextColor(STATUS_TEXT_COLOR, TFT_BLACK);
-        M5.Display.setTextSize(2);
-        drawStatusText(channel, 1);
-        drawBatteryArea(M5.Power.getBatteryLevel(), detectionCount);
-        ensureRssiHistoryInitialized();
-        drawRssiChart();
-        drawGraphBox();
+        drawMainDisplay(channel, M5.Power.getBatteryLevel(), detectionCount, true);
         displayState = DisplayState::Awake;
         displayStateMs = nowMs;
     }
@@ -633,17 +593,22 @@ void TelemetryReporter::initialize() {
     bootTime = millis();
 }
 
+void TelemetryReporter::setGPSHandler(GPSHandler* handler) {
+    gpsHandler = handler;
+}
+
 void TelemetryReporter::handleThreatDetection(const ThreatEvent& threat) {
-    DynamicJsonDocument doc(2048);
-    
+    DynamicJsonDocument doc(3072);  // Increased size for GPS data
+
     doc["event"] = "target_detected";
     doc["ms_since_boot"] = millis() - bootTime;
-    
+
     appendSourceInfo(threat, doc);
     appendTargetIdentity(threat, doc);
     appendIndicators(threat, doc);
     appendMetadata(threat, doc);
-    
+    appendGPSLocation(doc);
+
     outputJSON(doc);
 }
 
@@ -683,14 +648,46 @@ void TelemetryReporter::appendIndicators(const ThreatEvent& threat, JsonDocument
 
 void TelemetryReporter::appendMetadata(const ThreatEvent& threat, JsonDocument& doc) {
     JsonObject metadata = doc.createNestedObject("metadata");
-    
+
     if (strcmp(threat.radioType, "wifi") == 0) {
         metadata["frame_type"] = "beacon";
     } else {
         metadata["frame_type"] = "advertisement";
     }
-    
+
     metadata["detection_method"] = "combined_signature";
+}
+
+void TelemetryReporter::appendGPSLocation(JsonDocument& doc) {
+    if (!gpsHandler) {
+        return;  // No GPS handler configured
+    }
+
+    JsonObject location = doc.createNestedObject("location");
+
+    if (gpsHandler->hasValidFix()) {
+        location["latitude"] = gpsHandler->getLatitude();
+        location["longitude"] = gpsHandler->getLongitude();
+        location["altitude_m"] = gpsHandler->getAltitude();
+        location["satellites"] = gpsHandler->getSatellites();
+        location["hdop"] = gpsHandler->getHdop();
+        location["fix_age_ms"] = gpsHandler->getLocationAge();
+        location["fix_valid"] = true;
+
+        // Add timestamp if available
+        int year, month, day, hour, minute, second;
+        gpsHandler->getDateTime(year, month, day, hour, minute, second);
+        if (year > 0) {
+            char timestamp[32];
+            snprintf(timestamp, sizeof(timestamp), "%04d-%02d-%02dT%02d:%02d:%02dZ",
+                year, month, day, hour, minute, second);
+            location["timestamp"] = timestamp;
+        }
+    } else {
+        location["fix_valid"] = false;
+        location["satellites"] = gpsHandler->getSatellites();
+        location["note"] = "Waiting for GPS fix";
+    }
 }
 
 void TelemetryReporter::outputJSON(const JsonDocument& doc) {
@@ -700,22 +697,33 @@ void TelemetryReporter::outputJSON(const JsonDocument& doc) {
 
 // Main system initialization
 void setup() {
+    Serial.begin(115200);
+    delay(500);
+    Serial.println("\n\n========================================");
+    Serial.println("FlockSquawk M5StickC Plus2 with GPS");
+    Serial.println("========================================\n");
+
+    Serial.println("[INIT] Starting M5.begin()...");
     M5.begin();
+    Serial.println("[INIT] M5.begin() complete");
+
     M5.Display.setRotation(1);
     M5.Display.setTextSize(2);
     M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
     M5.Display.clear(TFT_BLACK);
     M5.Display.setCursor(0, 0);
-    M5.Display.println("Flock Detector V1.0");
+    M5.Display.println("Flock Detector");
+    M5.Display.setTextSize(1);
+    M5.Display.println("with GPS tracking");
+    M5.Display.setTextSize(2);
     M5.Display.println("");
     M5.Display.println("Starting...");
 
+    Serial.println("[INIT] Playing startup beeps...");
     playBeepPattern(STARTUP_BEEP_FREQ, BEEP_DURATION_MS, 3);
+    Serial.println("[INIT] Beeps complete");
 
-    Serial.begin(115200);
-    delay(1000);
-    
-    Serial.println("Initializing Threat Detection System...");
+    Serial.println("\nInitializing Threat Detection System...");
     Serial.println();
     
     EventBus::subscribeWifiFrame([](const WiFiFrameEvent& event) {
@@ -736,12 +744,30 @@ void setup() {
         portEXIT_CRITICAL(&threatMux);
     });
     
+    Serial.println("[INIT] Initializing threat engine...");
     threatEngine.initialize();
+
+    Serial.println("[INIT] Initializing telemetry reporter...");
     reporter.initialize();
+
+    Serial.println("[INIT] Initializing GPS module...");
+    M5.Display.setTextSize(1);
+    M5.Display.println("Init GPS (G26/G25)");
+    gpsModule.initialize();
+    Serial.println("[INIT] GPS module initialized");
+    M5.Display.println("GPS ready");
+    delay(500);
+
+    Serial.println("[INIT] Linking GPS to reporter...");
+    reporter.setGPSHandler(&gpsModule);
+
+    Serial.println("[INIT] Initializing RF scanner...");
     rfScanner.initialize();
-    
+    Serial.println("[INIT] RF scanner initialized");
+
+    Serial.println("\n========================================");
     Serial.println("System operational - scanning for targets");
-    Serial.println();
+    Serial.println("========================================\n");
     
     initScanningUi(RadioScannerManager::getCurrentWifiChannel(), millis());
     EventBus::publishSystemReady();
@@ -750,19 +776,15 @@ void setup() {
 void loop() {
     M5.update();
     rfScanner.update();
+    gpsModule.update();
+
     static uint8_t lastChannel = 0;
-    static uint8_t lastBattery = 255;
-    static uint8_t dots = 1;
-    static int16_t sweepX = 0;
-    static int16_t lastSweepX = -1;
-    static int8_t sweepDir = 1;
-    static uint32_t lastDotMs = 0;
-    static uint32_t lastBatteryMs = 0;
-    static uint32_t lastSweepMs = 0;
-    static uint32_t lastRssiMs = 0;
+    static uint32_t lastDisplayUpdateMs = 0;
+    static bool animDot = false;
     static bool wasAlertActive = false;
     static bool powerToggleHandled = false;
     static bool lastShouldPowerSave = false;
+
     uint8_t channel = RadioScannerManager::getCurrentWifiChannel();
     uint32_t now = millis();
     bool shouldPowerSave = powerSaverEnabled;
@@ -802,11 +824,7 @@ void loop() {
     if (M5.BtnA.wasPressed() && shouldPowerSave) {
         initScanningUi(channel, now);
         lastChannel = channel;
-        lastDotMs = now;
-        lastBatteryMs = now;
-        lastSweepMs = now;
-        lastRssiMs = now;
-        lastSweepX = -1;
+        lastDisplayUpdateMs = now;
     }
 
     bool isAlerting = updateAlert(now);
@@ -821,11 +839,7 @@ void loop() {
         } else {
             initScanningUi(channel, now);
             lastChannel = channel;
-            lastDotMs = now;
-            lastBatteryMs = now;
-            lastSweepMs = now;
-            lastRssiMs = now;
-            lastSweepX = -1;
+            lastDisplayUpdateMs = now;
         }
     }
     wasAlertActive = isAlerting;
@@ -861,57 +875,15 @@ void loop() {
         }
     }
 
-    if (!isAlerting && !statusMessageActive && displayState == DisplayState::Awake && channel != lastChannel) {
-        drawStatusText(channel, dots);
-        drawBatteryArea(M5.Power.getBatteryLevel(), detectionCount);
-        lastChannel = channel;
-    }
-
-    if (!isAlerting && !statusMessageActive && displayState == DisplayState::Awake && now - lastDotMs >= DOT_UPDATE_MS) {
-        dots = (dots % MAX_DOTS) + 1;
-        drawStatusText(channel, dots);
-        drawBatteryArea(M5.Power.getBatteryLevel(), detectionCount);
-        lastDotMs = now;
-    }
-
-    if (!isAlerting && !statusMessageActive && displayState == DisplayState::Awake && now - lastBatteryMs >= BATTERY_UPDATE_MS) {
-        uint8_t battery = M5.Power.getBatteryLevel();
-        if (battery != lastBattery) {
-            drawBatteryArea(battery, detectionCount);
-            lastBattery = battery;
+    // Update main display periodically
+    if (!isAlerting && !statusMessageActive && displayState == DisplayState::Awake) {
+        if (now - lastDisplayUpdateMs >= DOT_UPDATE_MS || channel != lastChannel) {
+            animDot = !animDot;
+            drawMainDisplay(channel, M5.Power.getBatteryLevel(), detectionCount, animDot);
+            lastChannel = channel;
+            lastDisplayUpdateMs = now;
         }
-        lastBatteryMs = now;
     }
 
-    if (!isAlerting && !statusMessageActive && now - lastRssiMs >= RSSI_UPDATE_MS) {
-        addRssiSample(latestRssi);
-        if (displayState == DisplayState::Awake) {
-            drawRssiChart();
-            drawGraphBox();
-        }
-        lastRssiMs = now;
-    }
-
-    if (!isAlerting && !statusMessageActive && displayState == DisplayState::Awake && now - lastSweepMs >= SWEEP_UPDATE_MS) {
-        int16_t width = M5.Display.width();
-        int16_t height = M5.Display.height();
-        int16_t sweepTopValue = graphTop();
-
-        if (lastSweepX >= 0) {
-            M5.Display.drawLine(lastSweepX, sweepTopValue, lastSweepX, height - 1, TFT_BLACK);
-        }
-        drawGraphBox();
-
-        M5.Display.drawLine(sweepX, sweepTopValue, sweepX, height - 1, RADAR_LINE_COLOR);
-        lastSweepX = sweepX;
-
-        sweepX += sweepDir;
-        if (sweepX <= 0 || sweepX >= width - 1) {
-            sweepDir = -sweepDir;
-            sweepX += sweepDir;
-        }
-
-        lastSweepMs = now;
-    }
     delay(30);
 }
