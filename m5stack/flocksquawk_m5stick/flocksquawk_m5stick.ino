@@ -5,6 +5,7 @@
 #include <NimBLEAdvertisedDevice.h>
 #include <ArduinoJson.h>
 #include <M5Unified.h>
+#include <Preferences.h>
 #include <string.h>
 #include <ctype.h>
 #include <stdint.h>
@@ -26,6 +27,7 @@ RadioScannerManager rfScanner;
 ThreatAnalyzer threatEngine;
 TelemetryReporter reporter;
 GPSHandler gpsModule;
+Preferences preferences;
 
 // Detection storage for GPX export
 struct StoredDetection {
@@ -49,6 +51,37 @@ EventBus::BluetoothHandler EventBus::bluetoothHandler = nullptr;
 EventBus::ThreatHandler EventBus::threatHandler = nullptr;
 EventBus::SystemEventHandler EventBus::systemReadyHandler = nullptr;
 
+// Save detections to flash memory
+void saveDetectionsToFlash() {
+    preferences.begin("flocksquawk", false);
+    preferences.putUChar("detCount", detectionHistoryCount);
+    preferences.putUChar("detIndex", detectionHistoryIndex);
+
+    for (uint8_t i = 0; i < detectionHistoryCount; i++) {
+        char key[16];
+        snprintf(key, sizeof(key), "det%d", i);
+        preferences.putBytes(key, &detectionHistory[i], sizeof(StoredDetection));
+    }
+
+    preferences.end();
+}
+
+// Load detections from flash memory
+void loadDetectionsFromFlash() {
+    preferences.begin("flocksquawk", true);  // Read-only mode
+    detectionHistoryCount = preferences.getUChar("detCount", 0);
+    detectionHistoryIndex = preferences.getUChar("detIndex", 0);
+
+    for (uint8_t i = 0; i < detectionHistoryCount; i++) {
+        char key[16];
+        snprintf(key, sizeof(key), "det%d", i);
+        preferences.getBytes(key, &detectionHistory[i], sizeof(StoredDetection));
+    }
+
+    preferences.end();
+    Serial.printf("[STORAGE] Loaded %d detections from flash\n", detectionHistoryCount);
+}
+
 // Function to store a detection in history
 void storeDetection(const ThreatEvent& threat) {
     if (!gpsModule.hasValidFix()) {
@@ -70,6 +103,9 @@ void storeDetection(const ThreatEvent& threat) {
     if (detectionHistoryCount < MAX_STORED_DETECTIONS) {
         detectionHistoryCount++;
     }
+
+    // Save to flash memory
+    saveDetectionsToFlash();
 }
 
 // Generate compact GPX XML from stored detections
@@ -164,8 +200,15 @@ namespace {
         Off
     };
 
+    enum class UIPage {
+        MainUI,
+        DetectionList
+    };
+
     DisplayState displayState = DisplayState::Awake;
+    UIPage currentPage = UIPage::MainUI;
     uint32_t displayStateMs = 0;
+    uint8_t detectionListScrollPos = 0;
 
     // Button double-click detection
     const uint32_t DOUBLE_CLICK_WINDOW_MS = 400;
@@ -275,11 +318,112 @@ namespace {
         }
     }
 
+    // Draw detection list page
+    void drawDetectionList(uint8_t scrollPos) {
+        M5.Display.fillScreen(TFT_BLACK);
+        M5.Display.setTextSize(1);
+
+        // Header
+        M5.Display.setCursor(2, 2);
+        M5.Display.setTextColor(TFT_CYAN, TFT_BLACK);
+        M5.Display.printf("DETECTIONS (%d)", detectionHistoryCount);
+
+        if (detectionHistoryCount == 0) {
+            M5.Display.setCursor(4, 25);
+            M5.Display.setTextColor(TFT_YELLOW, TFT_BLACK);
+            M5.Display.println("No stored");
+            M5.Display.println("detections yet");
+            M5.Display.println();
+            M5.Display.setTextColor(TFT_DARKGREY, TFT_BLACK);
+            M5.Display.println("C: Back to main");
+            return;
+        }
+
+        // Ensure scroll position is valid
+        if (scrollPos >= detectionHistoryCount) {
+            scrollPos = 0;
+        }
+
+        // Display current detection
+        StoredDetection& det = detectionHistory[scrollPos];
+        int16_t yPos = 15;
+
+        M5.Display.setTextSize(1);
+        M5.Display.setCursor(2, yPos);
+        M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
+        M5.Display.printf("#%d/%d", scrollPos + 1, detectionHistoryCount);
+        yPos += 12;
+
+        // Separator
+        M5.Display.drawLine(0, yPos, M5.Display.width(), yPos, TFT_DARKGREY);
+        yPos += 3;
+
+        // Identifier
+        M5.Display.setCursor(2, yPos);
+        M5.Display.setTextColor(TFT_GREEN, TFT_BLACK);
+        M5.Display.printf("ID: %s", det.identifier);
+        yPos += 10;
+
+        // Radio type and RSSI
+        M5.Display.setCursor(2, yPos);
+        M5.Display.setTextColor(TFT_YELLOW, TFT_BLACK);
+        M5.Display.printf("%s: %ddBm", det.radioType, det.rssi);
+        yPos += 10;
+
+        // GPS coordinates
+        M5.Display.setCursor(2, yPos);
+        M5.Display.setTextColor(TFT_CYAN, TFT_BLACK);
+        M5.Display.printf("%.5f", det.latitude);
+        yPos += 10;
+
+        M5.Display.setCursor(2, yPos);
+        M5.Display.setTextColor(TFT_CYAN, TFT_BLACK);
+        M5.Display.printf("%.5f", det.longitude);
+        yPos += 10;
+
+        // Date/Time
+        if (det.year > 0) {
+            M5.Display.setCursor(2, yPos);
+            M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
+            M5.Display.printf("%04d-%02d-%02d", det.year, det.month, det.day);
+            yPos += 10;
+
+            M5.Display.setCursor(2, yPos);
+            M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
+            M5.Display.printf("%02d:%02d:%02d UTC", det.hour, det.minute, det.second);
+            yPos += 10;
+        }
+
+        // Navigation help
+        M5.Display.setCursor(2, M5.Display.height() - 10);
+        M5.Display.setTextColor(TFT_DARKGREY, TFT_BLACK);
+        M5.Display.print("A:Scroll C:Back");
+    }
+
     void initScanningUi(uint8_t channel, uint32_t nowMs) {
         setDisplayOn();
+        currentPage = UIPage::MainUI;
         drawMainDisplay(channel, M5.Power.getBatteryLevel(), detectionCount, true);
         displayState = DisplayState::Awake;
         displayStateMs = nowMs;
+    }
+
+    // Generate compact CSV format for QR (much smaller than GPX XML)
+    String generateCompactGPX() {
+        String data = "FS:";  // FlockSquawk header
+        for (uint8_t i = 0; i < detectionHistoryCount; i++) {
+            StoredDetection& det = detectionHistory[i];
+            if (!det.valid) continue;
+            if (i > 0) data += "|";
+            // Format: lat,lon,YYYYMMDDHHMMSS,rssi,id
+            char buf[80];
+            snprintf(buf, sizeof(buf), "%.5f,%.5f,%04d%02d%02d%02d%02d%02d,%d,%s",
+                det.latitude, det.longitude,
+                det.year, det.month, det.day, det.hour, det.minute, det.second,
+                det.rssi, det.identifier);
+            data += buf;
+        }
+        return data;
     }
 
     void displayQRCode() {
@@ -303,13 +447,55 @@ namespace {
             return;
         }
 
-        // Generate GPX
-        String gpxData = generateGPX();
+        // Generate compact data (CSV format instead of verbose GPX XML)
+        String compactData = generateCompactGPX();
 
-        // Create QR code
+        // Check if data fits in QR code (version 6 ECC_LOW ~136 bytes capacity)
+        if (compactData.length() > 130) {
+            M5.Display.setCursor(4, 20);
+            M5.Display.setTextColor(TFT_RED, TFT_BLACK);
+            M5.Display.println("Data too large");
+            M5.Display.setTextColor(TFT_YELLOW, TFT_BLACK);
+            M5.Display.printf("Size: %d bytes\n", compactData.length());
+            M5.Display.printf("Max: 130 bytes\n");
+            M5.Display.println();
+            M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
+            M5.Display.println("Reduce detections");
+            M5.Display.println("or export via");
+            M5.Display.println("serial instead");
+            M5.Display.println();
+            M5.Display.setTextColor(TFT_DARKGREY, TFT_BLACK);
+            M5.Display.println("Press to exit");
+            return;
+        }
+
+        // Allocate QR buffer on heap to avoid stack overflow
+        uint16_t bufferSize = qrcode_getBufferSize(6);
+        uint8_t* qrcodeBytes = (uint8_t*)malloc(bufferSize);
+        if (!qrcodeBytes) {
+            M5.Display.setCursor(4, 20);
+            M5.Display.setTextColor(TFT_RED, TFT_BLACK);
+            M5.Display.println("Memory error");
+            M5.Display.println();
+            M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
+            M5.Display.println("Press to exit");
+            return;
+        }
+
+        // Create QR code with error checking
         QRCode qrcode;
-        uint8_t qrcodeBytes[qrcode_getBufferSize(6)];
-        qrcode_initText(&qrcode, qrcodeBytes, 6, ECC_LOW, gpxData.c_str());
+        int8_t result = qrcode_initText(&qrcode, qrcodeBytes, 6, ECC_LOW, compactData.c_str());
+
+        if (result < 0) {
+            M5.Display.setCursor(4, 20);
+            M5.Display.setTextColor(TFT_RED, TFT_BLACK);
+            M5.Display.println("QR encode failed");
+            M5.Display.println();
+            M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
+            M5.Display.println("Press to exit");
+            free(qrcodeBytes);
+            return;
+        }
 
         // Draw QR code centered
         int qrScale = 2;  // Pixel size for each QR module
@@ -325,10 +511,13 @@ namespace {
             }
         }
 
+        // Free heap memory
+        free(qrcodeBytes);
+
         // Footer text
         M5.Display.setCursor(4, M5.Display.height() - 10);
         M5.Display.setTextColor(TFT_GREEN, TFT_BLACK);
-        M5.Display.print("Scan to get GPX");
+        M5.Display.print("Scan to get data");
     }
 
     void drawCenteredMessage(const char* line1, const char* line2, uint16_t bgColor, uint16_t textColor) {
@@ -858,6 +1047,9 @@ void setup() {
     playBeepPattern(STARTUP_BEEP_FREQ, BEEP_DURATION_MS, 3);
     Serial.println("[INIT] Beeps complete");
 
+    Serial.println("[INIT] Loading saved detections from flash...");
+    loadDetectionsFromFlash();
+
     Serial.println("\nInitializing Threat Detection System...");
     Serial.println();
     
@@ -924,22 +1116,52 @@ void loop() {
     uint32_t now = millis();
     bool shouldPowerSave = powerSaverEnabled;
 
-    // Button double-click detection for QR code
-    if (M5.BtnA.wasPressed()) {
-        uint32_t now = millis();
-
+    // Button C (BtnB) - Toggle between main UI and detection list (short press only)
+    static bool btnBWasLongPress = false;
+    if (M5.BtnB.wasReleased() && !btnBWasLongPress) {
         if (displayState == DisplayState::ShowingQR) {
             // Exit QR code view
             initScanningUi(channel, now);
-        } else if (waitingForDoubleClick && (now - lastBtnAPress) < DOUBLE_CLICK_WINDOW_MS) {
-            // Double-click detected - show QR code
-            waitingForDoubleClick = false;
-            displayState = DisplayState::ShowingQR;
-            displayQRCode();
-        } else {
-            // First click - wait for double-click
-            waitingForDoubleClick = true;
-            lastBtnAPress = now;
+        } else if (currentPage == UIPage::MainUI) {
+            // Switch to detection list
+            currentPage = UIPage::DetectionList;
+            detectionListScrollPos = 0;
+            setDisplayOn();
+            drawDetectionList(detectionListScrollPos);
+            displayState = DisplayState::Awake;
+            displayStateMs = now;
+        } else if (currentPage == UIPage::DetectionList) {
+            // Switch back to main UI
+            initScanningUi(channel, now);
+        }
+    }
+
+    // Button A - Different behavior depending on current page
+    if (M5.BtnA.wasPressed()) {
+        if (displayState == DisplayState::ShowingQR) {
+            // Exit QR code view
+            initScanningUi(channel, now);
+        } else if (currentPage == UIPage::DetectionList) {
+            // Scroll through detection list
+            if (detectionHistoryCount > 0) {
+                detectionListScrollPos = (detectionListScrollPos + 1) % detectionHistoryCount;
+                setDisplayOn();
+                drawDetectionList(detectionListScrollPos);
+                displayState = DisplayState::Awake;
+                displayStateMs = now;
+            }
+        } else if (currentPage == UIPage::MainUI) {
+            // Main UI: Double-click detection for QR code
+            if (waitingForDoubleClick && (now - lastBtnAPress) < DOUBLE_CLICK_WINDOW_MS) {
+                // Double-click detected - show QR code
+                waitingForDoubleClick = false;
+                displayState = DisplayState::ShowingQR;
+                displayQRCode();
+            } else {
+                // First click - wait for double-click
+                waitingForDoubleClick = true;
+                lastBtnAPress = now;
+            }
         }
     }
 
@@ -969,9 +1191,11 @@ void loop() {
         triggerAlert(now);
     }
 
+    // Long press Button B for power saver toggle
     if (M5.BtnB.pressedFor(2000) && !powerToggleHandled) {
         powerSaverEnabled = !powerSaverEnabled;
         powerToggleHandled = true;
+        btnBWasLongPress = true;
         showStatusMessage("Power saver", powerSaverEnabled ? "ON" : "OFF");
         shouldPowerSave = powerSaverEnabled;
         lastShouldPowerSave = shouldPowerSave;
@@ -979,6 +1203,11 @@ void loop() {
 
     if (M5.BtnB.wasReleased()) {
         powerToggleHandled = false;
+        // Reset long press flag after a short delay
+        if (btnBWasLongPress) {
+            delay(200);
+            btnBWasLongPress = false;
+        }
     }
 
     if (M5.BtnA.wasPressed() && shouldPowerSave) {
@@ -1035,13 +1264,22 @@ void loop() {
         }
     }
 
-    // Update main display periodically (but not in QR code mode)
+    // Update display periodically (but not in QR code mode)
     if (!isAlerting && !statusMessageActive && displayState == DisplayState::Awake) {
-        if (now - lastDisplayUpdateMs >= DOT_UPDATE_MS || channel != lastChannel) {
-            animDot = !animDot;
-            drawMainDisplay(channel, M5.Power.getBatteryLevel(), detectionCount, animDot);
-            lastChannel = channel;
-            lastDisplayUpdateMs = now;
+        if (currentPage == UIPage::MainUI) {
+            // Update main UI display
+            if (now - lastDisplayUpdateMs >= DOT_UPDATE_MS || channel != lastChannel) {
+                animDot = !animDot;
+                drawMainDisplay(channel, M5.Power.getBatteryLevel(), detectionCount, animDot);
+                lastChannel = channel;
+                lastDisplayUpdateMs = now;
+            }
+        } else if (currentPage == UIPage::DetectionList) {
+            // Detection list page - refresh less frequently
+            if (now - lastDisplayUpdateMs >= 1000) {
+                drawDetectionList(detectionListScrollPos);
+                lastDisplayUpdateMs = now;
+            }
         }
     }
 
