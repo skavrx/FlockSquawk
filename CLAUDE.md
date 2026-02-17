@@ -4,9 +4,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-FlockSquawk is an ESP32-based passive RF awareness system that detects surveillance devices via WiFi promiscuous mode and Bluetooth Low Energy scanning. It uses event-driven architecture with audio alerts, display feedback, and structured JSON telemetry output.
+FlockSquawk is an ESP32-based **passive RF awareness system** that detects surveillance devices via WiFi promiscuous mode and Bluetooth Low Energy scanning. It monitors wireless activity in the environment by sniffing WiFi management frames and BLE advertisements, matching them against known device signatures (SSIDs, MAC OUIs, BLE names, service UUIDs). When matches are found, it provides audio alerts, visual feedback on displays, and structured JSON telemetry output.
 
-**Critical Constraint**: Must use **ESP32 board support version 3.0.7 or older**. Newer versions cause IRAM overflow and compilation failure.
+The system is **passive only** - it does not transmit or interfere with wireless networks. It uses event-driven architecture connecting RadioScanner → ThreatAnalyzer → EventBus → Display/Audio/Telemetry components.
+
+**Critical Constraints**:
+- Must use **ESP32 board support version 3.0.7 or older**. Newer versions cause IRAM overflow and compilation failure.
+- This is an **Arduino IDE project** (not PlatformIO, not standard C++ build system). Each variant is a separate sketch.
+- The repository uses **git** for version control. Standard git workflow applies for committing changes to variants, signatures, or documentation.
 
 ## Build & Development Commands
 
@@ -101,6 +106,7 @@ Audio system varies by variant:
 
 ```
 FlockSquawk/
+├── test_qr_size.cpp        # Standalone test utility for QR data encoding (not part of Arduino build)
 ├── Mini12864/              # Full-featured LCD + encoder UI
 │   └── flocksquawk_mini12864/
 │       ├── flocksquawk_mini12864.ino
@@ -214,6 +220,18 @@ Event flow:
                       ↓                                   ↓
                    Display                          Display alert
 ```
+
+## Common Pitfalls to Avoid
+
+When working with this codebase, **do NOT**:
+- Upgrade ESP32 board support beyond version 3.0.7 (causes IRAM overflow)
+- Try to use PlatformIO or CMake build systems (this is Arduino IDE only)
+- Put EventBus static member definitions in .h files (must be in main .ino file due to Arduino's compilation model)
+- Use `esp_wifi_set_channel()` in WiFi callback context (keep callbacks minimal)
+- Upload filesystem while serial monitor is open (will fail)
+- Forget to copy EventBus boilerplate when creating new variants
+- Try to use BLE on ESP32-S2 variants (S2 is WiFi-only)
+- Upload WAV files to M5Fire via LittleFS (M5Fire uses SD card, not LittleFS)
 
 ## Important Implementation Details
 
