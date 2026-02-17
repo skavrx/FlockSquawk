@@ -19,6 +19,7 @@
 #include "src/ThreatAnalyzer.h"
 #include "src/TelemetryReporter.h"
 #include "src/GPSHandler.h"
+#include "src/qrcode.h"
 
 // Global system components
 RadioScannerManager rfScanner;
@@ -26,11 +27,90 @@ ThreatAnalyzer threatEngine;
 TelemetryReporter reporter;
 GPSHandler gpsModule;
 
+// Detection storage for GPX export
+struct StoredDetection {
+    double latitude;
+    double longitude;
+    int year, month, day, hour, minute, second;
+    char identifier[32];
+    char radioType[10];
+    int8_t rssi;
+    bool valid;
+};
+
+const uint8_t MAX_STORED_DETECTIONS = 20;
+StoredDetection detectionHistory[MAX_STORED_DETECTIONS];
+uint8_t detectionHistoryIndex = 0;
+uint8_t detectionHistoryCount = 0;
+
 // Event bus handler implementations
 EventBus::WiFiFrameHandler EventBus::wifiHandler = nullptr;
 EventBus::BluetoothHandler EventBus::bluetoothHandler = nullptr;
 EventBus::ThreatHandler EventBus::threatHandler = nullptr;
 EventBus::SystemEventHandler EventBus::systemReadyHandler = nullptr;
+
+// Function to store a detection in history
+void storeDetection(const ThreatEvent& threat) {
+    if (!gpsModule.hasValidFix()) {
+        return;  // Only store detections with valid GPS
+    }
+
+    StoredDetection& det = detectionHistory[detectionHistoryIndex];
+    det.latitude = gpsModule.getLatitude();
+    det.longitude = gpsModule.getLongitude();
+    gpsModule.getDateTime(det.year, det.month, det.day, det.hour, det.minute, det.second);
+    strncpy(det.identifier, threat.identifier, sizeof(det.identifier) - 1);
+    det.identifier[sizeof(det.identifier) - 1] = '\0';
+    strncpy(det.radioType, threat.radioType, sizeof(det.radioType) - 1);
+    det.radioType[sizeof(det.radioType) - 1] = '\0';
+    det.rssi = threat.rssi;
+    det.valid = true;
+
+    detectionHistoryIndex = (detectionHistoryIndex + 1) % MAX_STORED_DETECTIONS;
+    if (detectionHistoryCount < MAX_STORED_DETECTIONS) {
+        detectionHistoryCount++;
+    }
+}
+
+// Generate compact GPX XML from stored detections
+String generateGPX() {
+    String gpx = "<?xml version=\"1.0\"?>\n<gpx version=\"1.1\" creator=\"FlockSquawk\">\n";
+
+    for (uint8_t i = 0; i < detectionHistoryCount; i++) {
+        StoredDetection& det = detectionHistory[i];
+        if (!det.valid) continue;
+
+        gpx += "<wpt lat=\"";
+        gpx += String(det.latitude, 6);
+        gpx += "\" lon=\"";
+        gpx += String(det.longitude, 6);
+        gpx += "\">\n";
+
+        if (det.year > 0) {
+            char timeStr[32];
+            snprintf(timeStr, sizeof(timeStr), "%04d-%02d-%02dT%02d:%02d:%02dZ",
+                det.year, det.month, det.day, det.hour, det.minute, det.second);
+            gpx += "<time>";
+            gpx += timeStr;
+            gpx += "</time>\n";
+        }
+
+        gpx += "<name>";
+        gpx += det.identifier;
+        gpx += "</name>\n";
+
+        gpx += "<desc>";
+        gpx += det.radioType;
+        gpx += ", ";
+        gpx += det.rssi;
+        gpx += "dBm</desc>\n";
+
+        gpx += "</wpt>\n";
+    }
+
+    gpx += "</gpx>";
+    return gpx;
+}
 
 namespace {
     const uint16_t STARTUP_BEEP_FREQ = 2000;
@@ -80,11 +160,17 @@ namespace {
     enum class DisplayState {
         Awake,
         PowerSaveMessage,
+        ShowingQR,
         Off
     };
 
     DisplayState displayState = DisplayState::Awake;
     uint32_t displayStateMs = 0;
+
+    // Button double-click detection
+    const uint32_t DOUBLE_CLICK_WINDOW_MS = 400;
+    uint32_t lastBtnAPress = 0;
+    bool waitingForDoubleClick = false;
 
     void setDisplayOn() {
         M5.Display.wakeup();
@@ -194,6 +280,55 @@ namespace {
         drawMainDisplay(channel, M5.Power.getBatteryLevel(), detectionCount, true);
         displayState = DisplayState::Awake;
         displayStateMs = nowMs;
+    }
+
+    void displayQRCode() {
+        setDisplayOn();
+        M5.Display.fillScreen(TFT_BLACK);
+        M5.Display.setTextSize(1);
+
+        // Header
+        M5.Display.setCursor(4, 2);
+        M5.Display.setTextColor(TFT_CYAN, TFT_BLACK);
+        M5.Display.printf("GPX EXPORT (%d)", detectionHistoryCount);
+
+        if (detectionHistoryCount == 0) {
+            M5.Display.setCursor(4, 20);
+            M5.Display.setTextColor(TFT_YELLOW, TFT_BLACK);
+            M5.Display.println("No detections");
+            M5.Display.println("with GPS fix");
+            M5.Display.println();
+            M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
+            M5.Display.println("Press to exit");
+            return;
+        }
+
+        // Generate GPX
+        String gpxData = generateGPX();
+
+        // Create QR code
+        QRCode qrcode;
+        uint8_t qrcodeBytes[qrcode_getBufferSize(6)];
+        qrcode_initText(&qrcode, qrcodeBytes, 6, ECC_LOW, gpxData.c_str());
+
+        // Draw QR code centered
+        int qrScale = 2;  // Pixel size for each QR module
+        int qrSize = qrcode.size * qrScale;
+        int offsetX = (M5.Display.width() - qrSize) / 2;
+        int offsetY = 20;  // Below header
+
+        for (uint8_t y = 0; y < qrcode.size; y++) {
+            for (uint8_t x = 0; x < qrcode.size; x++) {
+                uint16_t color = qrcode_getModule(&qrcode, x, y) ? TFT_BLACK : TFT_WHITE;
+                M5.Display.fillRect(offsetX + x * qrScale, offsetY + y * qrScale,
+                    qrScale, qrScale, color);
+            }
+        }
+
+        // Footer text
+        M5.Display.setCursor(4, M5.Display.height() - 10);
+        M5.Display.setTextColor(TFT_GREEN, TFT_BLACK);
+        M5.Display.print("Scan to get GPX");
     }
 
     void drawCenteredMessage(const char* line1, const char* line2, uint16_t bgColor, uint16_t textColor) {
@@ -789,6 +924,30 @@ void loop() {
     uint32_t now = millis();
     bool shouldPowerSave = powerSaverEnabled;
 
+    // Button double-click detection for QR code
+    if (M5.BtnA.wasPressed()) {
+        uint32_t now = millis();
+
+        if (displayState == DisplayState::ShowingQR) {
+            // Exit QR code view
+            initScanningUi(channel, now);
+        } else if (waitingForDoubleClick && (now - lastBtnAPress) < DOUBLE_CLICK_WINDOW_MS) {
+            // Double-click detected - show QR code
+            waitingForDoubleClick = false;
+            displayState = DisplayState::ShowingQR;
+            displayQRCode();
+        } else {
+            // First click - wait for double-click
+            waitingForDoubleClick = true;
+            lastBtnAPress = now;
+        }
+    }
+
+    // Reset double-click waiting after timeout
+    if (waitingForDoubleClick && (millis() - lastBtnAPress) > DOUBLE_CLICK_WINDOW_MS) {
+        waitingForDoubleClick = false;
+    }
+
     if (wifiFramePending) {
         WiFiFrameEvent frameCopy;
         portENTER_CRITICAL(&wifiMux);
@@ -806,6 +965,7 @@ void loop() {
         threatPending = false;
         portEXIT_CRITICAL(&threatMux);
         reporter.handleThreatDetection(threatCopy);
+        storeDetection(threatCopy);  // Store for GPX export
         triggerAlert(now);
     }
 
@@ -875,7 +1035,7 @@ void loop() {
         }
     }
 
-    // Update main display periodically
+    // Update main display periodically (but not in QR code mode)
     if (!isAlerting && !statusMessageActive && displayState == DisplayState::Awake) {
         if (now - lastDisplayUpdateMs >= DOT_UPDATE_MS || channel != lastChannel) {
             animDot = !animDot;
@@ -883,6 +1043,12 @@ void loop() {
             lastChannel = channel;
             lastDisplayUpdateMs = now;
         }
+    }
+
+    // Don't update display if showing QR code
+    if (displayState == DisplayState::ShowingQR) {
+        delay(30);
+        return;
     }
 
     delay(30);
